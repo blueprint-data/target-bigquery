@@ -529,6 +529,76 @@ class BaseBigQuerySink(BatchSink):
         """Return a worker class for the given parallelization type."""
         raise NotImplementedError
 
+    def _build_merge_statement(
+        self,
+        bigquery_client: bigquery.Client,
+        target: bigquery.Table,
+        source_table: bigquery.Table,
+        using_table_sql: str,
+    ) -> str:
+        """Construct a MERGE statement based on the configured column selection strategy.
+
+        This method encapsulates the logic for selecting columns (all vs. intersection)
+        and optionally performing additive schema evolution before building the MERGE
+        statement. It returns a complete MERGE statement ending with a semicolon.
+        """
+        # Column selection strategy for MERGE operations
+        strategy: str = self.config.get("merge_column_strategy", "target_all")
+
+        # Resolve schemas
+        target_field_names = [f.name for f in target.schema]
+        source_field_names = [f.name for f in source_table.schema]
+
+        # Optionally expand target schema with additive fields from source (DDL)
+        if strategy == "alter_then_intersection" and source_field_names:
+            missing_in_target = [
+                name for name in source_field_names if name not in target_field_names
+            ]
+            if missing_in_target:
+                source_fields_by_name = {f.name: f for f in source_table.schema}
+                new_fields = [source_fields_by_name[n] for n in missing_in_target]
+                mutated_schema = list(target.schema) + new_fields
+                target.schema = mutated_schema
+                bigquery_client.update_table(
+                    target, ["schema"], retry=bigquery.DEFAULT_RETRY.with_timeout(15)
+                )
+                target_field_names = [f.name for f in target.schema]
+
+        # Determine columns used in UPDATE/INSERT
+        if strategy in ("intersection", "alter_then_intersection") and source_field_names:
+            selected_columns = [
+                name for name in target_field_names if name in set(source_field_names)
+            ]
+        else:
+            selected_columns = target_field_names[:]
+
+        # Exclude key columns from the UPDATE SET clause
+        update_columns = [
+            c for c in selected_columns if c not in set(self.key_properties or [])
+        ]
+
+        merge_clause = (
+            f"MERGE `{self.merge_target}` AS target USING {using_table_sql} AS source ON "
+            + " AND ".join(
+                f"target.`{f}` = source.`{f}`" for f in self.key_properties
+            )
+        )
+
+        parts: List[str] = [merge_clause + " "]
+
+        if update_columns:
+            update_clause = "UPDATE SET " + ", ".join(
+                f"target.`{c}` = source.`{c}`" for c in update_columns
+            )
+            parts.append(f"WHEN MATCHED THEN {update_clause} ")
+
+        insert_clause = (
+            f"INSERT ({', '.join(f'`{c}`' for c in selected_columns)}) "
+            f"VALUES ({', '.join(f'source.`{c}`' for c in selected_columns)})"
+        )
+        parts.append(f"WHEN NOT MATCHED THEN {insert_clause}; ")
+        return "".join(parts)
+
     def merge_table(self, bigquery_client:bigquery.Client) -> None:
         target = self.merge_target.as_table()
         ordering_columns = ["_sdc_extracted_at", "_sdc_received_at"]
@@ -543,25 +613,22 @@ class BaseBigQuerySink(BatchSink):
                 f"ORDER BY {', '.join(f'{c} DESC' for c in ordering_columns)}) = 1"
             )
             ctas_tmp = f"CREATE OR REPLACE TEMP TABLE `{tmp}` AS {dedupe_query}"
-        merge_clause = (
-                f"MERGE `{self.merge_target}` AS target USING `{tmp or self.table}` AS source ON "
-                + " AND ".join(
-            f"target.`{f}` = source.`{f}`" for f in self.key_properties
+
+        source_table = self.table.as_table()
+        using_table_sql = f"`{tmp or self.table}`"
+        merge_sql = self._build_merge_statement(
+            bigquery_client=bigquery_client,
+            target=target,
+            source_table=source_table,
+            using_table_sql=using_table_sql,
         )
-        )
-        update_clause = "UPDATE SET " + ", ".join(
-            f"target.`{f.name}` = source.`{f.name}`" for f in target.schema
-        )
-        insert_clause = (
-            f"INSERT ({', '.join(f'`{f.name}`' for f in target.schema)}) "
-            f"VALUES ({', '.join(f'source.`{f.name}`' for f in target.schema)})"
-        )
-        bigquery_client.query(
-            f"{ctas_tmp}; {merge_clause} "
-            f"WHEN MATCHED THEN {update_clause} "
-            f"WHEN NOT MATCHED THEN {insert_clause}; "
+
+        final_sql = (
+            f"{ctas_tmp}; "
+            f"{merge_sql} "
             f"DROP TABLE IF EXISTS {self.table.get_escaped_name()};"
-        ).result()
+        )
+        bigquery_client.query(final_sql).result()
 
     def clean_up(self) -> None:
         """Clean up the target table."""

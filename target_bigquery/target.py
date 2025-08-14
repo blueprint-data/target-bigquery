@@ -341,6 +341,27 @@ class TargetBigQuery(Target):
             ),
         ),
         th.Property(
+            "merge_column_strategy",
+            th.CustomType(
+                {
+                    "type": "string",
+                    "enum": [
+                        "target_all",
+                        "intersection",
+                        "alter_then_intersection",
+                    ],
+                }
+            ),
+            default="target_all",
+            description=(
+                "Controls how columns are selected in MERGE statements when upserting. "
+                "'target_all' (default) updates/inserts all target columns (current behavior). "
+                "'intersection' uses only columns present in both source and target to avoid schema drift errors. "
+                "'alter_then_intersection' first adds any missing target columns found in the source (additive only), "
+                "then merges using the intersection so new columns are populated in the same run."
+            ),
+        ),
+        th.Property(
             "schema_resolver_version",
             th.IntegerType,
             default=1,

@@ -11,6 +11,17 @@ from singer_sdk.testing import target_sync_test
 from target_bigquery.core import BigQueryCredentials, bigquery_client_factory
 from target_bigquery.target import TargetBigQuery
 
+LEGACY_STREAMING_INSERT_CI_SKIP_REASON = (
+    "BigQuery free tier blocks legacy streaming inserts in GitHub Actions CI."
+)
+
+
+def _skip_legacy_streaming_insert_in_ci(method: str) -> None:
+    """Skip legacy streaming integration tests only in GitHub Actions CI."""
+    if method == "streaming_insert" and os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.skip(LEGACY_STREAMING_INSERT_CI_SKIP_REASON)
+
+
 # id = (0-4) - normal case
 # id = 5 - datetime NULL case
 # id = 6 - datetime wrong format case
@@ -54,10 +65,10 @@ SECONDARY_SINGER_STREAM = """
     ["batch_job", "streaming_insert", "storage_write_api", "gcs_stage"],
     ids=["batch_job", "streaming_insert", "storage_write_api", "gcs_stage"],
 )
-@pytest.mark.parametrize(
-    "batch_mode", [False, True], ids=["no_batch_mode", "batch_mode"]
-)
-def test_basic_sync(method, batch_mode):
+@pytest.mark.parametrize("batch_mode", [False, True], ids=["no_batch_mode", "batch_mode"])
+def test_basic_sync(method, batch_mode, bigquery_gcs_config: dict[str, str]):
+    _skip_legacy_streaming_insert_in_ci(method)
+
     OPTS = {
         "method": method,
         "denormalized": False,
@@ -94,10 +105,7 @@ def test_basic_sync(method, batch_mode):
 
     target = TargetBigQuery(
         config={
-            "credentials_json": os.environ["BQ_CREDS"],
-            "project": os.environ["BQ_PROJECT"],
-            "dataset": os.environ["BQ_DATASET"],
-            "bucket": os.environ["GCS_BUCKET"],
+            **bigquery_gcs_config,
             **OPTS,
         },
     )
@@ -108,9 +116,7 @@ def test_basic_sync(method, batch_mode):
     # target.get_sink_class().WORKER_CAPACITY_FACTOR = 1
     # target.get_sink_class().WORKER_CREATION_MIN_INTERVAL = 1
 
-    client = bigquery_client_factory(
-        BigQueryCredentials(json=target.config["credentials_json"])
-    )
+    client = bigquery_client_factory(BigQueryCredentials(json=target.config["credentials_json"]))
     stdout, stderr = target_sync_test(target, singer_input)
     del stdout, stderr
     time.sleep(5)  # wait for the eventual consistency seen in LoadJob sinks
@@ -137,7 +143,9 @@ def test_basic_sync(method, batch_mode):
     ["batch_job", "streaming_insert", "gcs_stage", "storage_write_api"],
     ids=["batch_job", "streaming_insert", "gcs_stage", "storage_write_api"],
 )
-def test_basic_denorm_sync(method):
+def test_basic_denorm_sync(method, bigquery_gcs_config: dict[str, str]):
+    _skip_legacy_streaming_insert_in_ci(method)
+
     OPTS = {
         "method": method,
         "denormalized": True,
@@ -155,18 +163,13 @@ def test_basic_denorm_sync(method):
 
     singer_input = io.StringIO()
     singer_input.write(
-        BASIC_SINGER_STREAM.replace("{stream_name}", table_name).replace(
-            "{load_id}", load_id
-        )
+        BASIC_SINGER_STREAM.replace("{stream_name}", table_name).replace("{load_id}", load_id)
     )
     singer_input.seek(0)
 
     target = TargetBigQuery(
         config={
-            "credentials_json": os.environ["BQ_CREDS"],
-            "project": os.environ["BQ_PROJECT"],
-            "dataset": os.environ["BQ_DATASET"],
-            "bucket": os.environ["GCS_BUCKET"],
+            **bigquery_gcs_config,
             **OPTS,
         },
     )
@@ -177,9 +180,7 @@ def test_basic_denorm_sync(method):
     # target.get_sink_class().WORKER_CAPACITY_FACTOR = 2
     # target.get_sink_class().WORKER_CREATION_MIN_INTERVAL = 1
 
-    client = bigquery_client_factory(
-        BigQueryCredentials(json=target.config["credentials_json"])
-    )
+    client = bigquery_client_factory(BigQueryCredentials(json=target.config["credentials_json"]))
     stdout, stderr = target_sync_test(target, singer_input)
     del stdout, stderr
     time.sleep(10)  # wait for the eventual consistency seen in LoadJobs sinks

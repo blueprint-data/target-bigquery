@@ -13,22 +13,20 @@
 from __future__ import annotations
 
 import copy
+import multiprocessing as mp
+import multiprocessing.dummy as mp_dummy
 import time
 import uuid
+from collections.abc import Callable, Sequence
+from importlib import metadata
 from typing import (
-    TYPE_CHECKING,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
+    Any,
     cast,
 )
 
 from singer_sdk import Sink
 from singer_sdk import typing as th
+from singer_sdk.helpers._classproperty import classproperty
 from singer_sdk.target_base import Target
 
 from target_bigquery.batch_job import (
@@ -54,10 +52,6 @@ from target_bigquery.streaming_insert import (
     BigQueryStreamingInsertSink,
 )
 
-if TYPE_CHECKING:
-    from multiprocessing import Process, Queue
-    from multiprocessing.connection import Connection
-
 # Defaults for target worker pool parameters
 MAX_WORKERS = 15
 """Maximum number of workers to spawn."""
@@ -75,6 +69,7 @@ class TargetBigQuery(Target):
     _MAX_RECORD_AGE_IN_MINUTES = 5.0
 
     name = "target-bigquery"
+    package_name = "z3-target-bigquery"
     config_jsonschema = th.PropertiesList(
         th.Property(
             "credentials_path",
@@ -160,6 +155,14 @@ class TargetBigQuery(Target):
             default=False,
         ),
         th.Property(
+            "timestamp_format",
+            th.StringType,
+            description=(
+                "Optional BigQuery PARSE_TIMESTAMP format string used for generated timestamp"
+                " view columns when generate_view=true."
+            ),
+        ),
+        th.Property(
             "bucket",
             th.StringType,
             description="The GCS bucket to use for staging data. Only used if method is gcs_stage.",
@@ -193,6 +196,15 @@ class TargetBigQuery(Target):
             description=(
                 "Determines whether to cluster on the key properties from the tap. Defaults to"
                 " false. When false, clustering will be based on _sdc_batched_at instead."
+            ),
+        ),
+        th.Property(
+            "clustering_fields",
+            th.ArrayType(th.StringType),
+            required=False,
+            description=(
+                "Optional explicit BigQuery clustering fields. When set, this takes precedence"
+                " over cluster_on_key_properties."
             ),
         ),
         th.Property(
@@ -283,6 +295,7 @@ class TargetBigQuery(Target):
                 {
                     "anyOf": [
                         {"type": "boolean"},
+                        {"type": "string"},
                         {"type": "array", "items": {"type": "string"}},
                     ]
                 }
@@ -292,9 +305,10 @@ class TargetBigQuery(Target):
                 "Determines if we should upsert. Defaults to false. A value of true will write to a"
                 " temporary table and then merge into the target table (upsert). This requires the"
                 " target table to be unique on the key properties. A value of false will write to"
-                " the target table directly (append). A value of an array of strings will evaluate"
-                " the strings in order using fnmatch. At the end of the array, the value of the"
-                " last match will be used. If not matched, the default value is false (append)."
+                " the target table directly (append). String booleans are accepted for env-based"
+                " configuration. A string or array of strings will evaluate the strings in order"
+                " using fnmatch. At the end of the array, the value of the last match will be used."
+                " If not matched, the default value is false (append)."
             ),
         ),
         th.Property(
@@ -303,6 +317,7 @@ class TargetBigQuery(Target):
                 {
                     "anyOf": [
                         {"type": "boolean"},
+                        {"type": "string"},
                         {"type": "array", "items": {"type": "string"}},
                     ]
                 }
@@ -311,11 +326,12 @@ class TargetBigQuery(Target):
             description=(
                 "Determines if the target table should be overwritten on load. Defaults to false. A"
                 " value of true will write to a temporary table and then overwrite the target table"
-                " inside a transaction (so it is safe). A value of false will write to the target"
-                " table directly (append). A value of an array of strings will evaluate the strings"
-                " in order using fnmatch. At the end of the array, the value of the last match will"
-                " be used. If not matched, the default value is false. This is mutually exclusive"
-                " with the `upsert` option. If both are set, `upsert` will take precedence."
+                " atomically with CREATE OR REPLACE TABLE. A value of false will write to the"
+                " target table directly (append). String booleans are accepted for env-based"
+                " configuration. A string or array of strings will evaluate the strings in order"
+                " using fnmatch. At the end of the array, the value of the last match will be used."
+                " If not matched, the default value is false. This is mutually exclusive with the"
+                " `upsert` option. If both are set, `upsert` will take precedence."
             ),
         ),
         th.Property(
@@ -324,6 +340,7 @@ class TargetBigQuery(Target):
                 {
                     "anyOf": [
                         {"type": "boolean"},
+                        {"type": "string"},
                         {"type": "array", "items": {"type": "string"}},
                     ]
                 }
@@ -338,6 +355,26 @@ class TargetBigQuery(Target):
                 " unique in the source system. Data lake ingestion is often a good example of this"
                 " where the same unique record may exist in the lake at different points in time"
                 " from different extracts."
+                " String booleans and pattern strings are accepted for env-based configuration."
+            ),
+        ),
+        th.Property(
+            "temporary_table_expiration_hours",
+            th.IntegerType,
+            default=168,
+            description=(
+                "Number of hours before upsert and overwrite temporary tables expire. Defaults"
+                " to 168 hours so long-running syncs do not lose staged data after one day."
+            ),
+        ),
+        th.Property(
+            "temporary_table_name_template",
+            th.StringType,
+            default="{table_name}__{timestamp}__{uuid}",
+            description=(
+                "Template for upsert and overwrite temporary table names. Supports {table_name},"
+                " {timestamp}, and {uuid}; characters outside letters, digits, and underscores are"
+                " normalized to underscores."
             ),
         ),
         th.Property(
@@ -394,7 +431,7 @@ class TargetBigQuery(Target):
 
         def worker_factory():
             return cast(
-                Type[BaseWorker],
+                type[BaseWorker],
                 self.get_sink_class().worker_cls_factory(
                     self.proc_cls,
                     dict(self.config),
@@ -409,10 +446,18 @@ class TargetBigQuery(Target):
             )
 
         self.worker_factory = worker_factory
-        self.workers: List[Union[BaseWorker, "Process"]] = []
-        self.worker_pings: Dict[str, float] = {}
+        self.workers: list[BaseWorker | Any] = []
+        self.worker_pings: dict[str, float] = {}
         self._jobs_enqueued = 0
         self._last_worker_creation = 0.0
+
+    @classproperty
+    def plugin_version(self) -> str:
+        """Get the installed package version."""
+        try:
+            return metadata.version(self.package_name)
+        except metadata.PackageNotFoundError:
+            return "[could not be detected]"
 
     def increment_jobs_enqueued(self) -> None:
         """Increment the number of jobs enqueued."""
@@ -424,28 +469,24 @@ class TargetBigQuery(Target):
 
     def get_parallelization_components(
         self, default=ParType.THREAD
-    ) -> Tuple[
-        Type["Process"],
-        Callable[[bool], Tuple["Connection", "Connection"]],
-        Callable[[], "Queue"],
+    ) -> tuple[
+        type[Any],
+        Callable[[bool], tuple[Any, Any]],
+        Callable[[], Any],
         ParType,
     ]:
         """Get the appropriate Process, Pipe, and Queue classes and the assoc ParTyp enum."""
-        use_procs: Optional[bool] = self.config.get("options", {}).get("process_pool")
+        use_procs: bool | None = self.config.get("options", {}).get("process_pool")
 
         if use_procs is None:
             use_procs = default == ParType.PROCESS
 
         if not use_procs:
-            from multiprocessing.dummy import Pipe, Process, Queue
-
             self.logger.info("Using thread-based parallelism")
-            return Process, Pipe, Queue, ParType.THREAD  # type: ignore
+            return mp_dummy.Process, mp_dummy.Pipe, mp_dummy.Queue, ParType.THREAD
         else:
-            from multiprocessing import Pipe, Process, Queue
-
             self.logger.info("Using process-based parallelism")
-            return Process, Pipe, Queue, ParType.PROCESS
+            return mp.Process, mp.Pipe, mp.Queue, ParType.PROCESS
 
     # Worker management methods, which are used to manage the number of
     # workers in the pool. The ensure_workers method should be called
@@ -457,9 +498,7 @@ class TargetBigQuery(Target):
         """Predicate determining when it is valid to add a worker to the pool."""
         return (
             self._jobs_enqueued
-            > getattr(
-                self.get_sink_class(), "WORKER_CAPACITY_FACTOR", WORKER_CAPACITY_FACTOR
-            )
+            > getattr(self.get_sink_class(), "WORKER_CAPACITY_FACTOR", WORKER_CAPACITY_FACTOR)
             * (len(self.workers) + 1)
             and len(self.workers)
             < self.config.get("options", {}).get(
@@ -482,31 +521,23 @@ class TargetBigQuery(Target):
         if the add_worker_predicate evaluates to True. It will always
         ensure that there is at least one worker in the pool."""
         workers_to_cull = []
-        worker_spawned = False
         for i, worker in enumerate(self.workers):
-            if not cast("Process", worker).is_alive():
+            if not cast(Any, worker).is_alive():
                 workers_to_cull.append(i)
         for i in reversed(workers_to_cull):
             worker = self.workers.pop(i)
-            cast(
-                "Process", worker
-            ).join()  # Wait for the worker to terminate. This should be a no-op.
-            self.logger.info("Culling terminated worker %s", worker.ext_id)  # type: ignore
+            cast(Any, worker).join()  # Wait for termination. This should be a no-op.
+            self.logger.info("Culling terminated worker %s", worker.ext_id)
         while self.add_worker_predicate or not self.workers:
             worker = self.worker_factory()
-            cast("Process", worker).start()
+            cast(Any, worker).start()
             self.workers.append(worker)
-            worker_spawned = True
             self.logger.info("Adding worker %s", worker.ext_id)
             self._last_worker_creation = time.time()
-        if worker_spawned:
-            ...
 
     # SDK overrides to inject our worker management logic and sink selection.
 
-    def get_sink_class(
-        self, stream_name: Optional[str] = None
-    ) -> Type[BaseBigQuerySink]:
+    def get_sink_class(self, stream_name: str | None = None) -> type[BaseBigQuerySink]:
         """Returns the sink class to use for a given stream based on user config."""
         _ = stream_name
         method, denormalized = (
@@ -535,9 +566,9 @@ class TargetBigQuery(Target):
         self,
         stream_name: str,
         *,
-        record: Optional[dict] = None,
-        schema: Optional[dict] = None,
-        key_properties: Optional[List[str]] = None,
+        record: dict | None = None,
+        schema: dict | None = None,
+        key_properties: Sequence[str] | None = None,
     ) -> Sink:
         """Get a sink for a stream. If the sink does not exist, create it. This override skips sink recreation
         on schema change. Meaningful mid stream schema changes are not supported and extremely rare to begin
@@ -564,54 +595,67 @@ class TargetBigQuery(Target):
         while self.log_notification.poll():
             msg = self.log_notification.recv()
             self.logger.info(msg)
+        self._handle_worker_error()
+        super().drain_one(sink)
+
+    def _handle_worker_error(self, *, shutdown_workers: bool = True) -> None:
+        """Raise or log a worker error notification according to fail-fast config."""
         if self.error_notification.poll():
             e, msg = self.error_notification.recv()
             if self.config.get("fail_fast", True):
                 self.logger.error(msg)
-                try:
-                    # Try to drain if we can. This is a best effort.
-                    # TODO: we should consider if draining here is the right thing
-                    # to do. It's _possible_ we increment the state message when
-                    # data is not actually written. Its _unlikely_ so the upside is
-                    # greater than the downside for now but will revisit this.
-                    self.logger.error("Draining all sinks and terminating.")
-                    self.drain_all(is_endofpipe=True)
-                except Exception:
-                    self.logger.error("Drain failed.")
+                self.logger.error("Terminating workers without writing state.")
+                if shutdown_workers:
+                    self._shutdown_workers()
                 raise RuntimeError(msg) from e
             else:
                 self.logger.warning(msg)
-        super().drain_one(sink)
 
     def drain_all(self, is_endofpipe: bool = False) -> None:  # type: ignore
         """Drain all sinks and write state message. If is_endofpipe, execute clean_up() on all sinks.
         Includes an additional hook to allow sinks to do any pre-state message processing."""
         state = copy.deepcopy(self._latest_state)
-        sink: BaseBigQuerySink
         self._drain_all(list(self._sinks_active.values()), self.max_parallelism)
         if is_endofpipe:
-            for worker in self.workers:
-                if cast("Process", worker).is_alive():
-                    self.queue.put(None)
-            while len(self.workers):
-                cast("Process", worker).join()
-                worker = self.workers.pop()
-            for sink in self._sinks_active.values():  # type: ignore
-                sink.clean_up()
+            self._shutdown_workers()
+            self._handle_worker_error(shutdown_workers=False)
+            self._clean_up_sinks()
         else:
-            for worker in self.workers:
-                cast("Process", worker).join()
-            for sink in self._sinks_active.values():  # type: ignore
-                sink.pre_state_hook()
+            self._join_workers()
+            self._handle_worker_error()
+            self._run_pre_state_hooks()
         if state:
             self._write_state_message(state)
         self._reset_max_record_age()
 
-    def _validate_config(
-        self, raise_errors: bool = True, warnings_as_errors: bool = False
-    ) -> Tuple[List[str], List[str]]:
+    def _shutdown_workers(self) -> None:
+        """Send poison pills to live workers, then join and clear the pool."""
+        for worker in self.workers:
+            if cast(Any, worker).is_alive():
+                self.queue.put(None)
+        while self.workers:
+            worker = self.workers.pop()
+            cast(Any, worker).join()
+
+    def _join_workers(self) -> None:
+        """Join workers without clearing the pool."""
+        for worker in self.workers:
+            cast(Any, worker).join()
+
+    def _clean_up_sinks(self) -> None:
+        """Run end-of-pipe cleanup hooks for all active sinks."""
+        for sink in self._sinks_active.values():
+            cast(BaseBigQuerySink, sink).clean_up()
+
+    def _run_pre_state_hooks(self) -> None:
+        """Run pre-state hooks for all active sinks."""
+        for sink in self._sinks_active.values():
+            cast(BaseBigQuerySink, sink).pre_state_hook()
+
+    def _validate_config(self, *, raise_errors: bool = True) -> list[str]:
         """Don't throw on config validation since our JSON schema doesn't seem to play well with meltano for whatever reason"""
-        return super()._validate_config(False, False)
+        del raise_errors
+        return super()._validate_config(raise_errors=False)
 
 
 if __name__ == "__main__":

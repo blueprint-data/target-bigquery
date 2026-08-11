@@ -1,69 +1,105 @@
-[tool.poetry]
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
 name = "z3-target-bigquery"
 version = "0.7.2"
 description = "z3-target-bigquery is a Singer target for BigQuery. It supports storage write, GCS, streaming, and batch load methods. Built with the Meltano SDK."
-authors = ["Alex Butler <butler.alex2010@gmail.com>"]
-keywords = ["ELT", "BigQuery"]
-license = "MIT"
-include = ["target_bigquery/*.py", "README.md", "LICENSE"]
-homepage = "https://github.com/z3z1ma/target-bigquery"
-repository = "https://github.com/z3z1ma/target-bigquery"
 readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Alex Butler", email = "butler.alex2010@gmail.com" }]
+keywords = ["ELT", "BigQuery"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
-  "Programming Language :: Python :: 3.8",
-  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Typing :: Typed",
 ]
-packages = [
-  { include = "target_bigquery/*.py" },
-  { include = "README.md" },
-  { include = "LICENSE" },
+dependencies = [
+  "google-cloud-bigquery[bqstorage]>=3.42.1,<4",
+  "google-cloud-storage>=3.12,<4",
+  "orjson>=3.11.9,<4",
+  "proto-plus>=1.28,<2",
+  "protobuf>=6.33.6,<7",
+  "singer-sdk>=0.54.5,<0.55",
+  "tenacity>=8.0.1,<10",
 ]
 
-[tool.poetry.dependencies]
-python = "<3.12,>=3.8"
-requests = ">=2.25.1"
-singer-sdk = ">=0.22.0,<0.23.0"
-google-cloud-bigquery = { version = ">=3.4.1,<4", extras = ["bqstorage"] }
-orjson = ">=3.7.2,<4"
-tenacity = ">=8.0.1,<9"
-grpcio-tools = ">=1.51.1,<2"
-google-cloud-storage = ">=2.7.0,<3"
-grpcio-status = ">=1.51.1,<2"
+[dependency-groups]
+dev = [
+  "coverage>=7.6",
+  "deptry>=0.23",
+  "hypothesis>=6.155.7",
+  "mypy>=1.10",
+  "pydoclint>=0.7",
+  "pytest>=9.0.3",
+  "pytest-benchmark>=5.2.3",
+  "pytest-randomly>=3.15",
+  "pytest-timeout>=2.3",
+  "pytest-xdist>=3.5",
+  "ruff>=0.14",
+  "types-protobuf>=6.30",
+  "tox>=4.20",
+  "vulture>=2.14",
+]
 
-[tool.poetry.dev-dependencies]
-pytest = "^6.2.5"
-tox = "^3.24.4"
-flake8 = "^3.9.2"
-black = "^21.9b0"
-pydocstyle = "^6.1.1"
-mypy = "^0.910"
-types-requests = "^2.26.1"
-isort = "^5.10.1"
+[project.urls]
+Homepage = "https://github.com/z3z1ma/target-bigquery"
+Repository = "https://github.com/z3z1ma/target-bigquery"
 
-[tool.black] # https://black.readthedocs.io/en/stable/usage_and_configuration/the_basics.html#configuration-via-a-file
+[project.scripts]
+target-bigquery = "target_bigquery.target:TargetBigQuery.cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["target_bigquery"]
+exclude = ["target_bigquery/tests"]
+
+[tool.uv]
+exclude-newer = "7 days"
+constraint-dependencies = [
+  "cryptography>=48.0.1",
+  "pyopenssl>=26.0.0",
+  "python-dotenv>=1.2.2",
+]
+
+[tool.ruff]
 line-length = 100
-target-version = ["py39"]
-preview = true
+target-version = "py310"
 
-[tool.isort] # https://pycqa.github.io/isort/docs/configuration/options.html
-color_output = true
-line_length = 100
-profile = "black"
-src_paths = "target_bigquery"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+  # Long generated SQL and JSONL fixtures are clearer when kept as literal expected strings.
+  "E501",
+]
 
-[build-system]
-requires = ["poetry-core>=1.0.8"]
-build-backend = "poetry.core.masonry.api"
+[tool.pytest.ini_options]
+testpaths = ["target_bigquery/tests"]
 
-[tool.poetry.scripts]
-target-bigquery = 'target_bigquery.target:TargetBigQuery.cli'
+[tool.deptry.per_rule_ignores]
+DEP004 = ["hypothesis", "pytest"]
+
+[tool.mypy]
+python_version = "3.10"
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+  "google.cloud.storage",
+  "google.cloud.storage.*",
+  "proto",
+  "proto.*",
+]
+ignore_missing_imports = true
+
+[tool.vulture]
+paths = ["target_bigquery"]
+min_confidence = 80

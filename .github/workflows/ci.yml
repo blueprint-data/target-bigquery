@@ -5,12 +5,14 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - "**.py"
-      - "poetry.lock"
+      - "pyproject.toml"
+      - "uv.lock"
   push:
     branches: [main]
     paths:
       - "**.py"
-      - "poetry.lock"
+      - "pyproject.toml"
+      - "uv.lock"
   workflow_dispatch:
     inputs: {}
 
@@ -28,7 +30,7 @@ jobs:
   build:
     strategy:
       matrix:
-        py_version: ["3.8", "3.9", "3.10"]
+        py_version: ["3.10", "3.11", "3.12"]
     runs-on: ubuntu-latest
     env:
       PYTHON_VERSION: ${{ matrix.py_version }}
@@ -37,21 +39,18 @@ jobs:
       BQ_CREDS: ${{ secrets.BQ_CREDS }}
       GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
       - name: Setup Python ${{ matrix.py_version }}
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: ${{ matrix.py_version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
       - name: Install Target Bigquery
-        run: |
-          python -m pip install --upgrade pip poetry
-          poetry install
+        run: uv sync --frozen
       - name: Run SDK Tests
-        run: |
-          poetry run pytest -k test_core
+        run: uv run --frozen pytest -k test_core
       - name: Run Bigquery Unit Tests
-        run: |
-          poetry run pytest -k test_utils
+        run: uv run --frozen pytest -k test_utils
       - name: Run Bigquery Integration Tests
-        run: |
-          poetry run pytest -k test_sync
+        run: uv run --frozen pytest -k test_sync

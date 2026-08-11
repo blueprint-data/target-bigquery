@@ -14,7 +14,7 @@ import os
 from multiprocessing import Process
 from multiprocessing.dummy import Process as _Thread
 from queue import Empty
-from typing import Any, Dict, List, Optional, Type, Union, cast
+from typing import Any, cast
 
 import orjson
 from google.api_core.exceptions import GatewayTimeout, NotFound
@@ -26,6 +26,7 @@ from target_bigquery.core import (
     BaseWorker,
     Denormalized,
     bigquery_client_factory,
+    make_json_compatible,
 )
 
 
@@ -35,7 +36,7 @@ class Job:
     def __init__(
         self,
         table: bigquery.TableReference,
-        records: List[Dict[str, Any]],
+        records: list[dict[str, Any]],
     ) -> None:
         self.table = table
         self.records = records
@@ -48,17 +49,17 @@ class StreamingInsertWorker(BaseWorker):
     def run(self) -> None:
         """Run the worker."""
         # A monkey patch since we can't override the default json encoder...
-        _http.json = orjson
+        cast(Any, _http).json = orjson
         client: bigquery.Client = bigquery_client_factory(self.credentials)
         while True:
             try:
-                job: Optional[Job] = self.queue.get(timeout=20.0)
+                job: Job | None = self.queue.get(timeout=20.0)
             except Empty:
                 break
             if job is None:
                 break
             try:
-                _ = retry(
+                errors = retry(
                     retry=retry_if_exception_type(
                         (ConnectionError, TimeoutError, NotFound, GatewayTimeout)
                     ),
@@ -66,6 +67,8 @@ class StreamingInsertWorker(BaseWorker):
                     stop=stop_after_delay(10),
                     reraise=True,
                 )(client.insert_rows_json)(table=job.table, json_rows=job.records)
+                if errors:
+                    raise RuntimeError(f"BigQuery streaming insert returned row errors: {errors}")
             except Exception as exc:
                 job.attempt += 1
                 if job.attempt > 3:
@@ -98,37 +101,28 @@ class BigQueryStreamingInsertSink(BaseBigQuerySink):
 
     @staticmethod
     def worker_cls_factory(
-        worker_executor_cls: Type[Process], config: Dict[str, Any]
-    ) -> Type[
-        Union[
-            StreamingInsertThreadWorker,
-            StreamingInsertProcessWorker,
-        ]
-    ]:
+        worker_executor_cls: type[Process], config: dict[str, Any]
+    ) -> type[StreamingInsertThreadWorker | StreamingInsertProcessWorker]:
         Worker = type("Worker", (StreamingInsertWorker, worker_executor_cls), {})
-        return cast(Type[StreamingInsertThreadWorker], Worker)
+        return cast(type[StreamingInsertThreadWorker], Worker)
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
         record = super().preprocess_record(record, context)
-        record["data"] = orjson.dumps(record["data"]).decode("utf-8")
+        record["data"] = orjson.dumps(make_json_compatible(record["data"])).decode("utf-8")
         return record
 
     @property
     def max_size(self) -> int:
         return min(super().max_size, 500)
 
-    def process_record(self, record: Dict[str, Any], context: Dict[str, Any]) -> None:
-        self.records_to_drain.append(record)
+    def process_record(self, record: dict[str, Any], context: dict[str, Any]) -> None:
+        self.records_to_drain.append(make_json_compatible(record))
 
-    def process_batch(self, context: Dict[str, Any]) -> None:
-        self.global_queue.put(
-            Job(table=self.table.as_ref(), records=self.records_to_drain.copy())
-        )
+    def process_batch(self, context: dict[str, Any]) -> None:
+        self.global_queue.put(Job(table=self.table.as_ref(), records=self.records_to_drain.copy()))
         self.increment_jobs_enqueued()
         self.records_to_drain = []
 
 
-class BigQueryStreamingInsertDenormalizedSink(
-    Denormalized, BigQueryStreamingInsertSink
-):
+class BigQueryStreamingInsertDenormalizedSink(Denormalized, BigQueryStreamingInsertSink):
     pass

@@ -1,5 +1,6 @@
 """Tests for worker lifecycle helpers that do not require BigQuery."""
 
+from decimal import Decimal
 from io import BytesIO
 from multiprocessing import Process
 from queue import Empty
@@ -425,7 +426,11 @@ def test_serialize_json_fields_for_storage_write_proto():
         SchemaField("active", "BOOLEAN"),
     ]
     record = {
-        "json_payload": {"status": "active", "priority": 1},
+        "json_payload": {
+            "status": "active",
+            "priority": 1,
+            "promise_amount": Decimal("1.7976931348623157e+308"),
+        },
         "json_items": [{"category": "primary"}, ["secondary"]],
         "settings": {"json_override": {"enabled": True}},
         "active": True,
@@ -434,14 +439,20 @@ def test_serialize_json_fields_for_storage_write_proto():
     serialized = storage_write.serialize_json_fields(record, schema)
 
     assert serialized == {
-        "json_payload": '{"status":"active","priority":1}',
+        "json_payload": (
+            '{"status":"active","priority":1,'
+            '"promise_amount":1.7976931348623157e+308}'
+        ),
         "json_items": ['{"category":"primary"}', '["secondary"]'],
         "settings": {"json_override": '{"enabled":true}'},
         "active": True,
     }
     proto_cls = storage_write.proto_schema_factory_v2(schema)
     parsed = json_format.ParseDict(serialized, proto_cls())
-    assert parsed.json_payload == '{"status":"active","priority":1}'
+    assert parsed.json_payload == (
+        '{"status":"active","priority":1,'
+        '"promise_amount":1.7976931348623157e+308}'
+    )
     assert list(parsed.json_items) == ['{"category":"primary"}', '["secondary"]']
     assert parsed.settings.json_override == '{"enabled":true}'
 

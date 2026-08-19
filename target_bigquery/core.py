@@ -11,6 +11,7 @@
 import datetime
 import gzip
 import json
+import math
 import mmap
 import re
 import shutil
@@ -205,7 +206,18 @@ def make_json_compatible(value: Any) -> Any:
     """Return a value compatible with BigQuery JSON upload and load paths."""
     if isinstance(value, Decimal):
         if value.is_finite() and value == value.to_integral_value():
-            return int(value)
+            if -(2**63) <= value <= 2**63 - 1:
+                return int(value)
+
+            # Preserve scientific JSON numbers, such as 1.7976931348623157e+308,
+            # as FLOAT64 values instead of expanding them into Python integers that
+            # orjson cannot encode.
+            if value.as_tuple().exponent > 0:
+                value_as_float = float(value)
+                if math.isfinite(value_as_float):
+                    return value_as_float
+
+            return str(value)
         if value.is_finite():
             return float(value)
         return str(value)

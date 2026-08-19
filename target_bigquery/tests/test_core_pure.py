@@ -647,6 +647,27 @@ def test_streaming_insert_records_are_normalized_to_json_compatible_values():
     }
 
 
+def test_make_json_compatible_preserves_wide_scientific_decimals_as_floats():
+    value = Decimal("1.7976931348623157e+308")
+
+    result = make_json_compatible(value)
+
+    assert isinstance(result, float)
+    assert result == float(value)
+
+
+def test_make_json_compatible_preserves_wide_non_scientific_integers_as_strings():
+    value = Decimal("9223372036854775808")
+
+    assert make_json_compatible(value) == "9223372036854775808"
+
+
+def test_make_json_compatible_preserves_unrepresentable_scientific_decimals_as_strings():
+    value = Decimal("1e+10000")
+
+    assert make_json_compatible(value) == "1E+10000"
+
+
 def test_denormalized_update_schema_uses_bigquery_client_for_gcs_stage_sinks():
     sink = object.__new__(BigQueryBatchJobDenormalizedSink)
     sink.table = BigQueryTable(

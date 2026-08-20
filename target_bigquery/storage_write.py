@@ -389,9 +389,7 @@ class BigQueryStorageWriteSink(BaseBigQuerySink):
     @property
     def proto_schema(self) -> type[message.Message]:
         if not hasattr(self, "_proto_schema"):
-            self._proto_schema = proto_schema_factory_v2(
-                self.resolved_schema
-            )
+            self._proto_schema = proto_schema_factory_v2(self.resolved_schema)
         return cast(type[message.Message], self._proto_schema)
 
     def start_batch(self, context: dict[str, Any]) -> None:
@@ -460,6 +458,7 @@ class BigQueryStorageWriteSink(BaseBigQuerySink):
 
     def pre_state_hook(self) -> None:
         self.commit_streams()
+        super().pre_state_hook()
 
 
 class BigQueryStorageWriteDenormalizedSink(Denormalized, BigQueryStorageWriteSink):

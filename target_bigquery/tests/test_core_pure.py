@@ -718,6 +718,19 @@ def test_make_json_compatible_preserves_wide_non_scientific_integers_as_strings(
     assert make_json_compatible(value) == "9223372036854775808"
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (-(2**63), -(2**63)),
+        (2**63 - 1, 2**63 - 1),
+        (-(2**63) - 1, str(-(2**63) - 1)),
+        (2**63, str(2**63)),
+    ],
+)
+def test_make_json_compatible_preserves_wide_native_integers(value, expected):
+    assert make_json_compatible(value) == expected
+
+
 def test_make_json_compatible_preserves_unrepresentable_scientific_decimals_as_strings():
     value = Decimal("1e+10000")
 

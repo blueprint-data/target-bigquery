@@ -440,8 +440,7 @@ def test_serialize_json_fields_for_storage_write_proto():
 
     assert serialized == {
         "json_payload": (
-            '{"status":"active","priority":1,'
-            '"promise_amount":1.7976931348623157e+308}'
+            '{"status":"active","priority":1,"promise_amount":1.7976931348623157e+308}'
         ),
         "json_items": ['{"category":"primary"}', '["secondary"]'],
         "settings": {"json_override": '{"enabled":true}'},
@@ -450,8 +449,7 @@ def test_serialize_json_fields_for_storage_write_proto():
     proto_cls = storage_write.proto_schema_factory_v2(schema)
     parsed = json_format.ParseDict(serialized, proto_cls())
     assert parsed.json_payload == (
-        '{"status":"active","priority":1,'
-        '"promise_amount":1.7976931348623157e+308}'
+        '{"status":"active","priority":1,"promise_amount":1.7976931348623157e+308}'
     )
     assert list(parsed.json_items) == ['{"category":"primary"}', '["secondary"]']
     assert parsed.settings.json_override == '{"enabled":true}'
@@ -677,3 +675,24 @@ def test_storage_write_commit_streams_tolerates_already_closed_stream(monkeypatc
     assert committer.finalized == [stream_name]
     assert committer.committed == [[stream_name]]
     assert sink.open_streams == set()
+
+
+def test_pre_state_hook_calls_commit_then_super(monkeypatch):
+    sink = object.__new__(storage_write.BigQueryStorageWriteSink)
+    sink.logger = SimpleNamespace(debug=lambda *args: None)
+    call_order: list[str] = []
+
+    def fake_commit() -> None:
+        call_order.append("commit")
+
+    def fake_super_hook(self) -> None:
+        call_order.append("super_pre_state")
+
+    monkeypatch.setattr(sink, "commit_streams", fake_commit)
+    monkeypatch.setattr("target_bigquery.core.BaseBigQuerySink.pre_state_hook", fake_super_hook)
+
+    sink.pre_state_hook()
+
+    assert call_order == ["commit", "super_pre_state"], (
+        f"Expected commit before super, got {call_order}"
+    )

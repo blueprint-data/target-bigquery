@@ -370,14 +370,17 @@ class BigQueryStorageWriteSink(BaseBigQuerySink):
     ) -> None:
         super().__init__(target, stream_name, schema, key_properties)
         self.open_streams: set[tuple[str, writer.AppendRowsStream]] = set()
+        self._refresh_parent()
+        self.stream_notification, self.stream_notifier = target.pipe_cls(False)
+        self._resolved_schema = self.table.get_resolved_schema(self.apply_transforms)
+        self.template = generate_template(self.proto_schema)
+
+    def _refresh_parent(self) -> None:
         self.parent = BigQueryWriteClient.table_path(
             self.table.project,
             self.table.dataset,
             self.table.name,
         )
-        self.stream_notification, self.stream_notifier = target.pipe_cls(False)
-        self._resolved_schema = self.table.get_resolved_schema(self.apply_transforms)
-        self.template = generate_template(self.proto_schema)
 
     @property
     def resolved_schema(self) -> list[SchemaField]:
@@ -459,6 +462,7 @@ class BigQueryStorageWriteSink(BaseBigQuerySink):
     def pre_state_hook(self) -> None:
         self.commit_streams()
         super().pre_state_hook()
+        self._refresh_parent()
 
 
 class BigQueryStorageWriteDenormalizedSink(Denormalized, BigQueryStorageWriteSink):

@@ -680,6 +680,12 @@ def test_storage_write_commit_streams_tolerates_already_closed_stream(monkeypatc
 def test_pre_state_hook_calls_commit_then_super(monkeypatch):
     sink = object.__new__(storage_write.BigQueryStorageWriteSink)
     sink.logger = SimpleNamespace(debug=lambda *args: None)
+    sink.parent = "projects/project/datasets/dataset/tables/previous_staging"
+    sink.table = SimpleNamespace(
+        project="project",
+        dataset="dataset",
+        name="current_staging",
+    )
     call_order: list[str] = []
 
     def fake_commit() -> None:
@@ -687,12 +693,23 @@ def test_pre_state_hook_calls_commit_then_super(monkeypatch):
 
     def fake_super_hook(self) -> None:
         call_order.append("super_pre_state")
+        sink.table = SimpleNamespace(
+            project="project",
+            dataset="dataset",
+            name="next_staging",
+        )
 
     monkeypatch.setattr(sink, "commit_streams", fake_commit)
     monkeypatch.setattr("target_bigquery.core.BaseBigQuerySink.pre_state_hook", fake_super_hook)
+    monkeypatch.setattr(
+        storage_write.BigQueryWriteClient,
+        "table_path",
+        lambda project, dataset, table: f"projects/{project}/datasets/{dataset}/tables/{table}",
+    )
 
     sink.pre_state_hook()
 
     assert call_order == ["commit", "super_pre_state"], (
         f"Expected commit before super, got {call_order}"
     )
+    assert sink.parent == "projects/project/datasets/dataset/tables/next_staging"

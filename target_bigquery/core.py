@@ -206,6 +206,8 @@ def selection_matches(selection: Any, stream_name: str) -> bool:
 
 def make_json_compatible(value: Any) -> Any:
     """Return a value compatible with BigQuery JSON upload and load paths."""
+    if isinstance(value, int) and not -(2**63) <= value <= 2**63 - 1:
+        return str(value)
     if isinstance(value, Decimal):
         if value.is_finite() and value == value.to_integral_value():
             if -(2**63) <= value <= 2**63 - 1:

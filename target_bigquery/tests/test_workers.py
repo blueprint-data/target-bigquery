@@ -455,6 +455,20 @@ def test_serialize_json_fields_for_storage_write_proto():
     assert parsed.settings.json_override == '{"enabled":true}'
 
 
+def test_serialize_json_fields_preserves_wide_native_integers_as_strings():
+    schema = [SchemaField("json_payload", "JSON")]
+    value = 10**309
+
+    serialized = storage_write.serialize_json_fields(
+        {"json_payload": {"promise_amount": value}},
+        schema,
+    )
+
+    assert serialized == {
+        "json_payload": f'{{"promise_amount":"{value}"}}',
+    }
+
+
 def test_denormalized_storage_write_serializes_json_before_proto_conversion():
     schema = [SchemaField("json_payload", "JSON")]
     proto_cls = storage_write.proto_schema_factory_v2(schema)
